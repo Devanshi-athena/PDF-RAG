@@ -3,6 +3,15 @@ import { useEffect, useRef, useState } from "react";
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
 const NOT_FOUND_ANSWER = "I couldn't find that in the uploaded PDF.";
 
+function Icon({ name, size = 16 }) {
+  const paths = {
+    file: <><path d="M5 2.75h6l3 3V15a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3.75a1 1 0 0 1 1-1Z" /><path d="M11 2.75v3h3M6.5 9h5M6.5 12h5" /></>,
+    mic: <><path d="M8 2.5a2 2 0 0 1 2 2v4a2 2 0 1 1-4 0v-4a2 2 0 0 1 2-2Z" /><path d="M3.75 8.5a4.25 4.25 0 0 0 8.5 0M8 13v2.5M5.75 15.5h4.5" /></>,
+    play: <path d="m6 4 8 4-8 4V4Z" />,
+    plus: <><path d="M8 3v10M3 8h10" /></>,
+  };
+  return <svg className={`icon icon-${name}`} width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, options);
   const body = await response.json().catch(() => ({}));
@@ -18,6 +27,7 @@ function App() {
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
   const [recording, setRecording] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [pendingByThread, setPendingByThread] = useState({});
   const recorder = useRef(null);
   const chunks = useRef([]);
@@ -103,40 +113,49 @@ function App() {
       recorder.current = media; media.start(); setRecording(true);
     } catch (e) { setError("Microphone permission was denied."); }
   };
-  const speak = (text) => { if ("speechSynthesis" in window) { window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance(text)); } };
+  const speak = (text) => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  };
   const removeThread = async (id) => { try { await request(`/threads/${id}`, { method: "DELETE" }); await refresh(); } catch (e) { setError(e.message); } };
 
   const visibleMessages = [...(active?.messages || []), ...(pendingByThread[active?.id] || [])];
 
   return <div className="app">
     <aside className="sidebar">
-      <div className="brand"><strong>PDF RAG</strong></div>
-      <button className="new-thread" onClick={newThread}>+ New thread</button>
+      <div className="brand"><img src="/aplyd-logo.png" alt="APLYD by Athena Infonomics" /><div><strong>PDF RAG</strong><span>Document assistant</span></div></div>
+      <button className="new-thread" onClick={newThread}><Icon name="plus" size={15} /> New thread</button>
       <div className="thread-list">{threads.map((thread) => <div className={`thread ${thread.id === active?.id ? "selected" : ""}`} key={thread.id}>
-        <button onClick={() => setActive(thread)}><span>{thread.pdf_name ? "[doc]" : "[ ]"}</span>{thread.name}</button>
-        <button className="delete" title="Delete thread" onClick={() => removeThread(thread.id)}>x</button>
+        <button onClick={() => setActive(thread)}><span className="thread-icon"><Icon name="file" size={15} /></span>{thread.name}</button>
+        <button className="delete" title="Delete thread" aria-label={`Delete ${thread.name}`} onClick={() => removeThread(thread.id)}>×</button>
       </div>)}</div>
       <small className="side-note">Documents and chat history stay local.</small>
     </aside>
     <main className="main">
       {!active ? <div className="empty"><h1>PDF RAG Assistant</h1><p>Create a thread and upload a PDF to get started.</p></div> :
       <>
-        <header className="header"><div><h1>{active.name}</h1><p>{active.document ? `${active.document.name} - ${active.document.pages} pages` : "Upload a PDF to begin"}</p></div>
-          {!active.document && (processing ? <div className="processing-status" role="status"><span className="spinner" />Processing...</div> : <label className="upload">Upload PDF<input type="file" accept="application/pdf" onChange={upload} disabled={busy || processing} /></label>)}
+        <header className="header"><div className="document-heading"><div className="document-icon"><Icon name="file" size={21} /></div><div><h1>{active.name}</h1><p>{active.document ? <><span>{active.document.name}</span><span className="header-meta">{active.document.pages} {active.document.pages === 1 ? "page" : "pages"} · <b>Ready</b></span></> : "Upload a PDF to begin"}</p></div></div>
+          {!active.document && (processing ? <div className="processing-status" role="status"><span className="spinner" />Processing...</div> : <label className="upload"><Icon name="file" size={15} /> Upload PDF<input type="file" accept="application/pdf" onChange={upload} disabled={busy || processing} /></label>)}
         </header>
         <section className="messages">
-          {!visibleMessages.length && <div className="welcome"><div className="welcome-icon">[doc]</div><h2>Ask questions about your document</h2><p>Answers are grounded in the uploaded PDF and include page sources.</p></div>}
+          {!visibleMessages.length && <div className="welcome"><div className="welcome-icon"><Icon name="file" size={22} /></div><h2>Ask questions about your document</h2><p>Answers are grounded in the uploaded PDF and include page sources.</p></div>}
           {visibleMessages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}-${message.content}`}><div className="avatar">{message.role === "user" ? "You" : "AI"}</div><div className="bubble"><div className="content">{message.content}</div>
-            {message.role === "assistant" && !message.pending && <><button className="listen" onClick={() => speak(message.content)}>Listen</button>{message.content.trim() !== NOT_FOUND_ANSWER && message.sources?.length > 0 && <details><summary>Sources ({message.sources.length})</summary>{message.sources.map((source, i) => <div className="source" key={i}><b>Page {source.page}</b><span>{source.text.slice(0, 300)}{source.text.length > 300 ? "..." : ""}</span></div>)}</details>}</>}
+            {message.role === "assistant" && !message.pending && <><button className={speaking ? "listen active" : "listen"} onClick={() => speak(message.content)}><Icon name="play" size={12} /> {speaking ? "Playing" : "Listen"}</button>{message.content.trim() !== NOT_FOUND_ANSWER && message.sources?.length > 0 && <details><summary>Sources ({message.sources.length})</summary>{message.sources.map((source, i) => <div className="source" key={i}><span className="source-page">Page {source.page}</span><span>{source.text.slice(0, 300)}{source.text.length > 300 ? "..." : ""}</span></div>)}</details>}</>}
             {message.role === "assistant" && message.pending && <button className="listen loading">Loading…</button>}
           </div></article>)}
           <div ref={endRef} />
         </section>
         {error && <div className="error">{error}<button onClick={() => setError("")}>x</button></div>}
-        <div className="composer"><button className={recording ? "mic recording" : "mic"} onClick={startRecording} disabled={!active.document || busy}>{recording ? "[stop]" : "[mic]"}</button><input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={active.document ? "Ask a question about the PDF..." : "Upload a PDF first"} disabled={!active.document || busy} /><button className="send" onClick={() => send()} disabled={!active.document || busy || !question.trim()}>{busy ? "..." : "send"}</button></div>
+        <div className="composer"><button className={recording ? "mic recording" : "mic"} onClick={startRecording} disabled={!active.document || busy} aria-label={recording ? "Stop recording" : "Start voice question"}><Icon name="mic" size={18} /><span className="control-label">{recording ? "Stop" : "Voice"}</span></button><input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={active.document ? "Ask a question about the PDF..." : "Upload a PDF first"} disabled={!active.document || busy} /><button className="send" onClick={() => send()} disabled={!active.document || busy || !question.trim()}>{busy ? "Sending..." : "Send"}</button></div>
       </>}
     </main>
   </div>;
 }
 
 export default App;
+
