@@ -10,7 +10,7 @@ Each thread has one PDF, its own chat history, and an isolated ChromaDB collecti
 - PDF extraction: PyMuPDF
 - OCR fallback: Tesseract via pytesseract and Pillow
 - Chunking: 1,200-character chunks with 200-character overlap
-- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
+- Embeddings: Hugging Face feature-extraction API using `sentence-transformers/all-MiniLM-L6-v2`
 - Vector database: persistent ChromaDB
 - LLM: Hugging Face `meta-llama/Llama-3.1-8B-Instruct`
 - Speech-to-text: Hugging Face Whisper `openai/whisper-large-v3-turbo`
@@ -70,7 +70,7 @@ The frontend uses `http://localhost:8000/api` by default. Set `VITE_API_URL` if 
 | `HF_ASR_MODEL` | Speech-to-text model |
 | `HF_ASR_URL` | Speech-to-text endpoint |
 | `HF_PROVIDER` | Optional Hugging Face provider |
-| `EMBEDDING_MODEL` | Sentence Transformer model |
+| `EMBEDDING_MODEL` | Hugging Face embedding model |
 | `CHUNK_SIZE` | Chunk size; default `1200` |
 | `CHUNK_OVERLAP` | Chunk overlap; default `200` |
 | `TOP_K` | Retrieved chunks; default `5` |

@@ -11,7 +11,7 @@ flowchart LR
     EXTRACT -->|empty page| OCR[Tesseract OCR]
     EXTRACT --> CHUNK[Page-preserving chunks]
     OCR --> CHUNK
-    CHUNK --> EMBED[Sentence Transformers]
+    CHUNK --> EMBED[Hugging Face embeddings API]
     EMBED --> DB[(ChromaDB collection per thread)]
     API --> RETRIEVE[Top-K retrieval for active thread]
     RETRIEVE --> DB
@@ -28,7 +28,8 @@ flowchart LR
 `POST /api/threads/{id}/document` validates the PDF, extracts text page by page,
 uses Tesseract only for pages without extracted text, and splits text into
 1,200-character chunks with 200-character overlap. Each chunk keeps its page
-number. Sentence Transformers embeds the chunks and ChromaDB stores them.
+number. The Hugging Face feature-extraction API embeds the chunks remotely and
+ChromaDB stores the returned vectors.
 
 The frontend displays `Processing...` and a spinner until this request completes.
 The upload control is disabled during processing. Success displays the processed

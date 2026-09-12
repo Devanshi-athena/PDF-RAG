@@ -21,7 +21,10 @@ class ChatService:
 
     def store(self, thread_id: str):
         return self.vector_store_factory(
-            self.settings.chroma_dir, thread_id, self.settings.embedding_model
+            self.settings.chroma_dir,
+            thread_id,
+            self.settings.embedding_model,
+            token=self.settings.hf_token,
         )
 
     def _hf_client(self):

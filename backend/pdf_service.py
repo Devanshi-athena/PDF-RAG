@@ -9,8 +9,8 @@ from .ocr_service import extract_page_text
 
 def extract_pages(pdf_bytes: bytes, ocr: Callable | None = None) -> list[tuple[int, str]]:
     try:
-        import fitz
-        document = fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf")
+        import pymupdf
+        document = pymupdf.open(stream=io.BytesIO(pdf_bytes), filetype="pdf")
     except Exception as error:
         raise BackendError("The uploaded file is not a readable PDF.", 422, "invalid_pdf") from error
     pages: list[tuple[int, str]] = []

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pymupdf
+
 from .errors import OCRUnavailable
 
 
@@ -14,7 +16,7 @@ def extract_page_text(page) -> str:
             "and install the Tesseract OCR executable, then retry."
         ) from error
     try:
-        pixmap = page.get_pixmap(matrix=__import__("fitz").Matrix(2, 2), alpha=False)
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
         image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
         return (pytesseract.image_to_string(image) or "").strip()
     except Exception as error:

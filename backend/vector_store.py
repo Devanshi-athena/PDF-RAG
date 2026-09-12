@@ -1,40 +1,104 @@
 from __future__ import annotations
 
-import threading
+import math
+import os
 from pathlib import Path
+from numbers import Real
+
+from .errors import BackendError
 
 
-class LocalEmbeddingFunction:
-    _models: dict[str, object] = {}
-    _lock = threading.Lock()
+class HFEmbeddingFunction:
+    EMBEDDING_DIMENSION = 384
 
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, token: str):
+        if not token:
+            raise BackendError(
+                "HF_TOKEN is required for document embeddings. Add it to .env.",
+                503,
+                "embedding_not_configured",
+            )
         self.model_name = model_name
+        try:
+            from huggingface_hub import InferenceClient
+        except ImportError as error:
+            raise RuntimeError("huggingface-hub is required for document embeddings.") from error
+        self.client = InferenceClient(token=token)
 
-    @property
-    def model(self):
-        with self._lock:
-            if self.model_name not in self._models:
-                try:
-                    from sentence_transformers import SentenceTransformer
-                except ImportError as error:
-                    raise RuntimeError("sentence-transformers is required for local embeddings.") from error
-                self._models[self.model_name] = SentenceTransformer(self.model_name)
-            return self._models[self.model_name]
+    @staticmethod
+    def _normalize(value: list) -> list[float]:
+        if not value or not all(isinstance(item, Real) for item in value):
+            raise RuntimeError("Hugging Face returned an invalid embedding shape.")
+        vector = [float(item) for item in value]
+        if not all(math.isfinite(item) for item in vector):
+            raise RuntimeError("Hugging Face returned non-finite embedding values.")
+        norm = math.sqrt(sum(item * item for item in vector))
+        return [item / norm for item in vector] if norm else vector
 
-    def __call__(self, values: list[str]) -> list[list[float]]:
-        return self.model.encode(values, normalize_embeddings=True).tolist()
+    @classmethod
+    def _convert_output(cls, result, count: int) -> list[list[float]]:
+        data = result.tolist() if hasattr(result, "tolist") else result
+        if not isinstance(data, list) or not data:
+            raise RuntimeError("Hugging Face returned an invalid embedding response.")
+        if count == 1 and all(isinstance(item, Real) for item in data):
+            vectors = [data]
+        elif count == 1 and len(data) == 1 and isinstance(data[0], list) and all(
+            isinstance(value, Real) for value in data[0]
+        ):
+            vectors = data
+        elif count > 1 and len(data) == count and all(
+            isinstance(item, list) and all(isinstance(value, Real) for value in item)
+            for item in data
+        ):
+            vectors = data
+        else:
+            raise RuntimeError(
+                "Hugging Face returned token-level or otherwise invalid embeddings; "
+                "expected one sentence embedding per input."
+            )
+        vectors = [cls._normalize(vector) for vector in vectors]
+        if any(len(vector) != cls.EMBEDDING_DIMENSION for vector in vectors):
+            raise RuntimeError(
+                f"Hugging Face returned an invalid embedding dimension; "
+                f"expected {cls.EMBEDDING_DIMENSION}."
+            )
+        return vectors
+
+    def __call__(self, values: str | list[str]) -> list[list[float]]:
+        texts = [values] if isinstance(values, str) else values
+        if not texts:
+            return []
+        try:
+            result = self.client.feature_extraction(texts, model=self.model_name)
+            return self._convert_output(result, len(texts))
+        except BackendError:
+            raise
+        except RuntimeError as error:
+            raise BackendError(str(error), 502, "embedding_error") from error
+        except Exception as error:
+            raise BackendError("Hugging Face embedding generation failed.", 502, "embedding_error") from error
 
 
 class ThreadVectorStore:
-    def __init__(self, root: Path, thread_id: str, embedding_model: str, client=None, embedding_function=None):
+    def __init__(
+        self,
+        root: Path,
+        thread_id: str,
+        embedding_model: str,
+        client=None,
+        embedding_function=None,
+        token: str | None = None,
+    ):
         try:
             import chromadb
         except ImportError as error:
             raise RuntimeError("chromadb is required for document search.") from error
         root.mkdir(parents=True, exist_ok=True)
         self.client = client or chromadb.PersistentClient(path=str(root))
-        self.embedding_function = embedding_function or LocalEmbeddingFunction(embedding_model)
+        self.embedding_function = embedding_function or HFEmbeddingFunction(
+            embedding_model,
+            token or os.getenv("HF_TOKEN", ""),
+        )
         self.collection = self.client.get_or_create_collection(name=f"thread_{thread_id.replace('-', '')}")
 
     def replace(self, chunks: list[dict]) -> None:
