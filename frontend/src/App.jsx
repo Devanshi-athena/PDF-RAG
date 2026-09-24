@@ -18,6 +18,35 @@ async function request(path, options = {}) {
   if (!response.ok) throw new Error(body?.detail?.message || body?.detail || "Request failed");
   return body;
 }
+async function streamChat(threadId, question, onToken, onDone) {
+  const response = await fetch(`${API}/threads/${threadId}/chat/stream`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body?.detail?.message || body?.detail || "Request failed");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const events = buffer.split("\n\n"); buffer = events.pop() || "";
+    for (const event of events) {
+      const lines = event.split("\n");
+      const type = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+      const data = lines.find((line) => line.startsWith("data:"))?.slice(5).trim();
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      if (type === "token") onToken(payload);
+      if (type === "done") onDone(payload);
+      if (type === "error") throw new Error(payload.message || "Chat generation failed");
+    }
+    if (done) break;
+  }
+}
 
 function App() {
   const [threads, setThreads] = useState([]);
@@ -83,7 +112,17 @@ function App() {
     addPendingMessages(threadId, text);
     try {
       setBusy(true); setError(""); setQuestion("");
-      await request(`/threads/${threadId}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: text }) });
+      let streamedAnswer = "";
+      await streamChat(threadId, text, (token) => {
+        streamedAnswer += token;
+        setPendingByThread((current) => ({
+          ...current,
+          [threadId]: [
+            ...(current[threadId] || []).slice(0, -1),
+            { role: "assistant", content: streamedAnswer, pending: true },
+          ],
+        }));
+      }, () => {});
       clearPendingMessages(threadId);
       await refresh(threadId);
     } catch (e) {
@@ -158,4 +197,3 @@ function App() {
 }
 
 export default App;
-

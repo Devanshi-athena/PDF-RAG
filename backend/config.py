@@ -26,7 +26,7 @@ def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
 @dataclass(frozen=True)
 class BackendSettings:
     hf_token: str = ""
-    chat_model: str = "meta-llama/Llama-3.1-8B-Instruct"
+    chat_model: str = "Qwen/Qwen2.5-3B-Instruct"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     asr_model: str = "openai/whisper-large-v3-turbo"
     asr_url: str = "https://router.huggingface.co/hf-inference"

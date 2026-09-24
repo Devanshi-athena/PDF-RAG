@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Iterator
+
 from .errors import BackendError
 from .models import Source, Thread
 from .vector_store import ThreadVectorStore
@@ -44,6 +47,62 @@ class ChatService:
         return self.client
 
     def ask(self, thread: Thread, question: str) -> tuple[str, list[Source]]:
+        total_started = time.perf_counter()
+        messages, sources = self._prompt(thread, question)
+        try:
+            llm_started = time.perf_counter()
+            response = self._hf_client().chat_completion(
+                model=self.settings.chat_model,
+                messages=messages,
+                temperature=self.settings.temperature,
+                max_tokens=700,
+            )
+            print(f"[PERF] llm_generation_seconds={time.perf_counter() - llm_started:.4f}")
+            answer = (response.choices[0].message.content or NOT_FOUND_ANSWER).strip()
+            print(f"[PERF] total_chat_request_seconds={time.perf_counter() - total_started:.4f}")
+            return answer, [] if answer == NOT_FOUND_ANSWER else sources
+        except BackendError:
+            print(f"[PERF] total_chat_request_seconds={time.perf_counter() - total_started:.4f}")
+            raise
+        except Exception as error:
+            print(f"[PERF] total_chat_request_seconds={time.perf_counter() - total_started:.4f}")
+            raise BackendError(f"Chat generation failed: {error}", 502, "llm_error") from error
+
+    def stream(self, thread: Thread, question: str) -> tuple[Iterator[str], list[Source]]:
+        total_started = time.perf_counter()
+        messages, sources = self._prompt(thread, question)
+
+        def generate() -> Iterator[str]:
+            try:
+                llm_started = time.perf_counter()
+                response = self._hf_client().chat_completion(
+                    model=self.settings.chat_model,
+                    messages=messages,
+                    temperature=self.settings.temperature,
+                    max_tokens=700,
+                    stream=True,
+                )
+                emitted = False
+                for chunk in response:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        emitted = True
+                        yield delta
+                if not emitted:
+                    yield NOT_FOUND_ANSWER
+                print(f"[PERF] llm_generation_seconds={time.perf_counter() - llm_started:.4f}")
+                print(f"[PERF] total_chat_request_seconds={time.perf_counter() - total_started:.4f}")
+            except BackendError:
+                print(f"[PERF] total_chat_request_seconds={time.perf_counter() - total_started:.4f}")
+                raise
+            except Exception as error:
+                print(f"[PERF] total_chat_request_seconds={time.perf_counter() - total_started:.4f}")
+                raise BackendError(f"Chat generation failed: {error}", 502, "llm_error") from error
+
+        return generate(), sources
+
+    def _prompt(self, thread: Thread, question: str) -> tuple[list[dict], list[Source]]:
+        total_started = time.perf_counter()
         excerpts = self.store(thread.id).search(question, self.settings.top_k)
         sources = [Source(page=item["page"], text=item["text"], pdf_name=thread.pdf_name or "Uploaded PDF") for item in excerpts]
         context = "\n\n".join(f"[Page {item['page']}]\n{item['text']}" for item in excerpts)
@@ -53,18 +112,5 @@ class ChatService:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history, {
             "role": "user", "content": f"PDF excerpts:\n{context}\n\nQuestion: {question}"
         }]
-        try:
-            response = self._hf_client().chat_completion(
-                model=self.settings.chat_model,
-                messages=messages,
-                temperature=self.settings.temperature,
-                max_tokens=700,
-            )
-            answer = (response.choices[0].message.content or NOT_FOUND_ANSWER).strip()
-            if answer == NOT_FOUND_ANSWER:
-                return answer, []
-            return answer, sources
-        except BackendError:
-            raise
-        except Exception as error:
-            raise BackendError(f"Chat generation failed: {error}", 502, "llm_error") from error
+        print(f"[PERF] retrieval_and_prompt_seconds={time.perf_counter() - total_started:.4f}")
+        return messages, sources

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from pathlib import Path
 from numbers import Real
 
@@ -118,10 +119,15 @@ class ThreadVectorStore:
         count = self.collection.count()
         if not count:
             return []
+        embedding_started = time.perf_counter()
+        query_embedding = self.embedding_function([query])
+        print(f"[PERF] query_embedding_seconds={time.perf_counter() - embedding_started:.4f}")
+        retrieval_started = time.perf_counter()
         result = self.collection.query(
-            query_embeddings=self.embedding_function([query]),
+            query_embeddings=query_embedding,
             n_results=min(max(1, top_k), count),
         )
+        print(f"[PERF] chroma_retrieval_seconds={time.perf_counter() - retrieval_started:.4f}")
         documents = result.get("documents", [[]])[0]
         metadatas = result.get("metadatas", [[]])[0]
         return [{"text": text, "page": int(metadata["page"])} for text, metadata in zip(documents, metadatas)]

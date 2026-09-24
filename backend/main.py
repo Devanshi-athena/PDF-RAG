@@ -128,6 +128,40 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
         threads.save(thread)
         return ChatResponse(answer=answer, sources=sources, message=assistant)
 
+    @app.post("/api/threads/{thread_id}/chat/stream")
+    def stream_question(thread_id: str, payload: ChatRequest):
+        from fastapi.responses import StreamingResponse
+        import json
+
+        thread = threads.get(thread_id)
+        if not thread.document:
+            raise http_error(BackendError("Upload a PDF before asking questions.", 409, "document_required"))
+        user_message = Message(role="user", content=payload.question)
+        thread.messages.append(user_message)
+        try:
+            tokens, sources = chat.stream(thread, payload.question)
+        except BackendError:
+            thread.messages.pop()
+            raise
+
+        def events():
+            answer_parts = []
+            try:
+                for token in tokens:
+                    answer_parts.append(token)
+                    yield f"event: token\ndata: {json.dumps(token)}\n\n"
+                answer = "".join(answer_parts).strip()
+                final_sources = [] if answer == "I couldn't find that in the uploaded PDF." else sources
+                assistant = Message(role="assistant", content=answer, sources=final_sources)
+                thread.messages.append(assistant)
+                threads.save(thread)
+                yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': [source.model_dump() for source in final_sources], 'message': assistant.model_dump()})}\n\n"
+            except BackendError as error:
+                thread.messages.pop()
+                yield f"event: error\ndata: {json.dumps({'message': error.message, 'code': error.code})}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
     @app.post("/api/threads/{thread_id}/transcribe", response_model=TranscriptionResponse)
     async def transcribe_audio(thread_id: str, file: UploadFile = File(...)):
         threads.get(thread_id)
