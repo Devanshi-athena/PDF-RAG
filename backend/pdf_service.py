@@ -6,10 +6,8 @@ import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable
 
 from .errors import BackendError
-from .ocr_service import extract_page_text
 
 _NUMBER_WORDS = (
     "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
@@ -54,7 +52,8 @@ class ParsedDocument:
     contents_numbers: dict[str, str] = field(default_factory=dict)  # normalized title -> "4" / "4.2" from the contents page
 
 
-def extract_document(pdf_bytes: bytes, ocr: Callable | None = None) -> ParsedDocument:
+def extract_document(pdf_bytes: bytes) -> ParsedDocument:
+    """Read the PDF's text layer. Pages without one (scanned/image-only) are skipped: OCR is not used."""
     started = time.perf_counter()
     try:
         import pymupdf
@@ -69,17 +68,16 @@ def extract_document(pdf_bytes: bytes, ocr: Callable | None = None) -> ParsedDoc
         except Exception:
             toc = []
         flags = pymupdf.TEXTFLAGS_TEXT
+        skipped = []
         for number, page in enumerate(document, start=1):
             lines = _page_lines(page.get_text("dict", flags=flags), page.rect.width)
             if not lines:
-                text = unicodedata.normalize("NFKC", (ocr or extract_page_text)(page) or "").strip()
-                lines = [
-                    _plain_line(line.strip(), index)
-                    for index, line in enumerate(text.splitlines()) if line.strip()
-                ]
+                skipped.append(number)
             raw_pages.append((number, page.rect.height, lines))
     finally:
         document.close()
+    if skipped:
+        print(f"[PERF] pages_without_text={len(skipped)} skipped={skipped[:20]}{'...' if len(skipped) > 20 else ''}")
 
     body_size = _body_font_size(raw_pages)
     _remove_running_lines(raw_pages)
@@ -101,7 +99,11 @@ def extract_document(pdf_bytes: bytes, ocr: Callable | None = None) -> ParsedDoc
             font_headings.extend({**heading, "page": number} for heading in headings)
             captions.extend({**caption, "page": number} for caption in page_captions)
     if not pages:
-        raise BackendError("No text could be extracted from this PDF.", 422, "empty_document")
+        raise BackendError(
+            "No text could be extracted from this PDF. It looks scanned (images only); scanned PDFs are not supported.",
+            422,
+            "empty_document",
+        )
 
     parsed = ParsedDocument(
         pages=pages, page_count=page_count, captions=_dedupe_captions(captions), tables=tables,
@@ -124,16 +126,11 @@ def extract_document(pdf_bytes: bytes, ocr: Callable | None = None) -> ParsedDoc
     return parsed
 
 
-def extract_pages(pdf_bytes: bytes, ocr: Callable | None = None) -> list[tuple[int, str]]:
-    return extract_document(pdf_bytes, ocr).pages
+def extract_pages(pdf_bytes: bytes) -> list[tuple[int, str]]:
+    return extract_document(pdf_bytes).pages
 
 
 # --------------------------------------------------------------------------- layout
-def _plain_line(text: str, index: int) -> dict:
-    return {"text": text, "size": 0.0, "bold": False, "block": index, "x0": 0.0, "y0": float(index),
-            "y1": float(index) + 0.5, "x1": 0.0, "block_lines": 1, "table": False}
-
-
 def _page_lines(data: dict, page_width: float) -> list[dict]:
     lines = []
     for block_index, block in enumerate(data.get("blocks", [])):

@@ -9,7 +9,6 @@ flowchart LR
 
     subgraph Upload
         PDF[PDF bytes] --> EXTRACT[pdf_service: layout extraction]
-        EXTRACT -->|page without text| OCR[Tesseract OCR]
         EXTRACT --> STRUCT[document_structure: outline, numbers, roles, captions, tables]
         STRUCT --> CHUNK[Section-aware chunks]
         CHUNK --> EMBED[Embeddings: HF API / local]
@@ -40,7 +39,8 @@ flowchart LR
 (`backend/ingestion.py`) in a worker thread so the API stays responsive.
 
 1. `pdf_service.extract_document` reads every page with PyMuPDF's layout data
-   (font size, bold, position) and uses Tesseract only for pages without text. It:
+   (font size, bold, position). OCR is not used: pages without a text layer (scanned or
+   image-only) are skipped and logged as `pages_without_text`. It:
    - normalises ligatures (NFKC) and drops rotated margin text;
    - rebuilds table rows from cells sharing a baseline (`a | b | c`, 2+ rows of 3+
      short cells outside prose blocks) - about 1 ms per page, unlike PyMuPDF's
@@ -217,7 +217,6 @@ Tests use fake models, so their timings do not represent real model latency.
 | `backend/config.py` | Settings from `.env` |
 | `backend/ingestion.py` | Extract → structure → chunk → index |
 | `backend/pdf_service.py` | Layout extraction, tables, captions, contents pages, outline detection, chunking |
-| `backend/ocr_service.py` | Tesseract fallback for pages without text |
 | `backend/document_structure.py` | Sections, units, numbering, labels, roles, fields, captions, tables |
 | `backend/vector_store.py` | Embeddings (API / local / hybrid), Chroma storage, in-memory hybrid search, optional reranker, cached summaries |
 | `backend/query_router.py` | Intent and mode routing, references, sub-questions, comparison sides |
@@ -234,6 +233,6 @@ Tests use fake models, so their timings do not represent real model latency.
 - ChromaDB is the only vector store backend.
 - Answer models run on Hugging Face Inference Providers and consume account credits.
 - Images and charts are not interpreted; only captions and surrounding text are used.
-- OCR requires the external Tesseract program.
+- No OCR: scanned or image-only pages are not indexed.
 - JSON thread storage is for local single-user use.
 - The test suite does not call real Hugging Face services or run a browser flow.

@@ -15,7 +15,7 @@ questions ("how many chapters?", "list the annexes") and short or vague question
 |---|---|
 | Frontend | React, Vite; browser `SpeechSynthesis` for the Listen button |
 | Backend | FastAPI, Uvicorn |
-| PDF reading | PyMuPDF (text, fonts, positions); Tesseract OCR for scanned pages (optional) |
+| PDF reading | PyMuPDF (text, fonts, positions); text-layer PDFs only - no OCR |
 | Search index | ChromaDB (on disk) plus an in-memory NumPy vector index and BM25 keyword index |
 | Models | Hugging Face Inference Providers, configured in `.env` (see below) |
 
@@ -50,7 +50,6 @@ Do not commit `.env`.
 
 Optional:
 
-- Scanned PDFs: install the Tesseract OCR program and check `tesseract --version`.
 - Local embeddings or a reranker (`EMBEDDING_BACKEND=hybrid` or `local`,
   `RERANKER_MODEL`): `pip install sentence-transformers`.
 
@@ -216,6 +215,6 @@ data, obsolete tests and caches.
 - `novita` serves Llama-3.1-8B with a 16k-token context; keep the `*_CONTEXT_CHARS`
   limits near their defaults with that provider.
 - Images and charts are not read; figure questions use captions and surrounding text.
-- Scanned pages need the Tesseract program installed.
+- No OCR: pages without a text layer (scanned pages, image-only covers) are skipped, and fully scanned PDFs are rejected.
 - JSON thread storage is meant for local single-user use; there is no authentication.
 - Browser speech quality depends on the browser and operating-system voices.

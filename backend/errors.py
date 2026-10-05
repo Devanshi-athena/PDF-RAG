@@ -18,11 +18,6 @@ class NotFoundError(BackendError):
         super().__init__(message, 404, "not_found")
 
 
-class OCRUnavailable(BackendError):
-    def __init__(self, message: str):
-        super().__init__(message, 422, "ocr_unavailable")
-
-
 def http_error(error: BackendError) -> HTTPException:
     return HTTPException(
         status_code=error.status_code,
