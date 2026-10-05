@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from backend.config import BackendSettings
 from backend.main import create_app
 from backend.models import Source
-from backend.pdf_service import chunk_pages
+from backend.pdf_service import ParsedDocument, chunk_pages
 from backend.thread_store import ThreadStore
 
 
@@ -14,8 +14,9 @@ class FakeCollection:
     def __init__(self):
         self.chunks = []
 
-    def replace(self, chunks):
+    def replace(self, chunks, structure=None):
         self.chunks = chunks
+        self.structure = structure
 
     def delete(self):
         self.chunks = []
@@ -40,7 +41,10 @@ def client(tmp_path, monkeypatch):
         documents_dir=tmp_path / "documents",
     )
     app = create_app(settings=settings, thread_store=ThreadStore(settings.threads_file), chat_service=FakeChat())
-    monkeypatch.setattr("backend.main.extract_pages", lambda data: [(1, "A page of text.")])
+    monkeypatch.setattr(
+        "backend.ingestion.extract_document",
+        lambda data: ParsedDocument(pages=[(1, "A page of text.")], page_count=1),
+    )
     return TestClient(app)
 
 
@@ -63,6 +67,27 @@ def test_not_found_and_document_processing(client):
     assert response.json()["document"]["pages"] == 1
     assert response.json()["document"]["chunks"] == 1
     assert client.get(f"/api/threads/{thread['id']}/document").json()["name"] == "notes.pdf"
+
+
+def test_upload_reports_document_ingestion_timings(client, capsys):
+    thread = client.post("/api/threads").json()
+
+    response = client.post(
+        f"/api/threads/{thread['id']}/document",
+        files={"file": ("notes.pdf", b"fake pdf", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    logs = capsys.readouterr().out
+    assert "[PERF] file_upload_start" in logs
+    assert "[PERF] file_upload_seconds=" in logs
+    assert "[PERF] pdf_extraction_seconds=" in logs
+    assert "[PERF] pages_processed=1" in logs
+    assert "[PERF] chunking_seconds=" in logs
+    assert "[PERF] chunks_created=1" in logs
+    assert "[PERF] embedding_indexing_call_seconds=" in logs
+    assert "[PERF] total_document_ingestion_seconds=" in logs
+    assert "[PERF] file_upload_end" in logs
 
 
 def test_chat_is_thread_isolated_and_empty_question_rejected(client):

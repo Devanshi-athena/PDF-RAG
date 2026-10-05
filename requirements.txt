@@ -12,3 +12,6 @@ pillow>=10.0.0
 pytesseract>=0.3.13
 pytest>=8.0.0
 httpx>=0.27.0
+numpy>=1.26
+# Optional: EMBEDDING_BACKEND=hybrid/local and RERANKER_MODEL need sentence-transformers (pulls in torch)
+# sentence-transformers>=3.0

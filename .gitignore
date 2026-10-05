@@ -10,14 +10,23 @@ __pycache__/
 *.py[cod]
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 .coverage
+.coverage.*
 htmlcov/
 *.egg-info/
 
-# Runtime data and generated application files
+# Runtime data: uploaded PDFs, search index, document structure, cached summaries, threads
 data/
+
+# Archived material the app does not use (old prototype, obsolete tests, caches)
 dump/
+
+# Logs and temporary files
 *.log
+*.tmp
 
 # JavaScript and build output
 node_modules/
@@ -28,5 +37,7 @@ frontend/dist/
 # Editors and operating-system files
 .vscode/
 .idea/
+*.swp
 .DS_Store
 Thumbs.db
+desktop.ini

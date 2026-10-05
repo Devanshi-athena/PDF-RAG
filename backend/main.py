@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from .chat_service import ChatService
 from .config import BackendSettings
 from .errors import BackendError, NotFoundError, http_error
 from .models import ChatRequest, ChatResponse, DocumentInfo, Message, Thread, ThreadCreate, TranscriptionResponse
-from .pdf_service import chunk_pages, extract_pages
+from .ingestion import ingest_pdf
 from .speech_service import transcribe
 from .thread_store import ThreadStore
 
@@ -23,6 +26,8 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
     settings.ensure_directories()
     threads = thread_store or ThreadStore(settings.threads_file)
     chat = chat_service or ChatService(settings)
+    if chat_service is None:
+        _warm_up_local_models(settings)
     app = FastAPI(title="PDF RAG Assistant API", version="1.0")
     app.state.settings = settings
     app.state.threads = threads
@@ -64,6 +69,9 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
         removed = threads.get(thread_id)
         try:
             chat.store(removed.id).delete()
+            discard_store = getattr(chat, "discard_store", None)
+            if discard_store:
+                discard_store(removed.id)
         except Exception as error:
             logger.exception("Failed to delete Chroma collection for thread %s", removed.id)
             raise http_error(
@@ -80,29 +88,45 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
 
     @app.post("/api/threads/{thread_id}/document", response_model=Thread)
     async def upload_document(thread_id: str, file: UploadFile = File(...)):
-        thread = threads.get(thread_id)
-        if file.content_type not in ("application/pdf", "application/x-pdf", None):
-            raise http_error(BackendError("Only PDF files are accepted.", 415, "invalid_file_type"))
-        data = await file.read(settings.max_pdf_bytes + 1)
-        if len(data) > settings.max_pdf_bytes:
-            raise http_error(BackendError("The PDF exceeds the configured size limit.", 413, "file_too_large"))
+        ingestion_started = time.perf_counter()
+        print("[PERF] file_upload_start")
         try:
-            pages = extract_pages(data)
-            chunks = chunk_pages(pages, settings.chunk_size, settings.chunk_overlap)
-            chat.store(thread.id).replace(chunks)
+            thread = threads.get(thread_id)
+            if file.content_type not in ("application/pdf", "application/x-pdf", None):
+                raise http_error(BackendError("Only PDF files are accepted.", 415, "invalid_file_type"))
+            upload_started = time.perf_counter()
+            data = await file.read(settings.max_pdf_bytes + 1)
+            print(f"[PERF] file_upload_seconds={time.perf_counter() - upload_started:.4f}")
+            if len(data) > settings.max_pdf_bytes:
+                raise http_error(BackendError("The PDF exceeds the configured size limit.", 413, "file_too_large"))
+            # Parsing and embedding are blocking; keep them off the event loop so other requests stay responsive.
+            result = await run_in_threadpool(
+                ingest_pdf, data, chat.store(thread.id), settings.chunk_size, settings.chunk_overlap
+            )
+            path = settings.documents_dir / f"{thread.id}.pdf"
+            path.write_bytes(data)
+            name = Path(file.filename or "document.pdf").name
+            now = datetime.now(timezone.utc).isoformat()
+            thread = threads.get(thread_id)
+            thread.pdf_name = name
+            thread.name = Path(name).stem[:40] or thread.name
+            thread.document = DocumentInfo(
+                name=name,
+                pages=result.pages,
+                chunks=result.chunks,
+                path=str(path),
+                uploaded_at=now,
+            )
+            threads.save(thread)
+            return thread
         except BackendError:
             raise
         except ValueError as error:
             raise http_error(BackendError(str(error), 422, "invalid_chunk_config"))
-        path = settings.documents_dir / f"{thread.id}.pdf"
-        path.write_bytes(data)
-        name = Path(file.filename or "document.pdf").name
-        now = datetime.now(timezone.utc).isoformat()
-        thread.pdf_name = name
-        thread.name = Path(name).stem[:40] or thread.name
-        thread.document = DocumentInfo(name=name, pages=len(pages), chunks=len(chunks), path=str(path), uploaded_at=now)
-        threads.save(thread)
-        return thread
+        finally:
+            elapsed = time.perf_counter() - ingestion_started
+            print(f"[PERF] file_upload_end elapsed_seconds={elapsed:.4f}")
+            print(f"[PERF] total_document_ingestion_seconds={elapsed:.4f}")
 
     @app.get("/api/threads/{thread_id}/document", response_model=DocumentInfo)
     def get_document(thread_id: str):
@@ -113,6 +137,7 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
 
     @app.post("/api/threads/{thread_id}/chat", response_model=ChatResponse)
     def ask_question(thread_id: str, payload: ChatRequest):
+        request_started = time.perf_counter()
         thread = threads.get(thread_id)
         if not thread.document:
             raise http_error(BackendError("Upload a PDF before asking questions.", 409, "document_required"))
@@ -122,10 +147,11 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
             answer, sources = chat.ask(thread, payload.question)
         except BackendError:
             thread.messages.pop()
+            print(f"[PERF] chat_endpoint_total_seconds={time.perf_counter() - request_started:.4f}")
             raise
         assistant = Message(role="assistant", content=answer, sources=sources)
-        thread.messages.append(assistant)
-        threads.save(thread)
+        _append_messages(threads, thread_id, user_message, assistant)
+        print(f"[PERF] chat_endpoint_total_seconds={time.perf_counter() - request_started:.4f}")
         return ChatResponse(answer=answer, sources=sources, message=assistant)
 
     @app.post("/api/threads/{thread_id}/chat/stream")
@@ -133,6 +159,7 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
         from fastapi.responses import StreamingResponse
         import json
 
+        request_started = time.perf_counter()
         thread = threads.get(thread_id)
         if not thread.document:
             raise http_error(BackendError("Upload a PDF before asking questions.", 409, "document_required"))
@@ -151,14 +178,21 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
                     answer_parts.append(token)
                     yield f"event: token\ndata: {json.dumps(token)}\n\n"
                 answer = "".join(answer_parts).strip()
-                final_sources = [] if answer == "I couldn't find that in the uploaded PDF." else sources
+                finalize = getattr(chat, "finalize_sources", None)
+                final_sources = finalize(answer, sources) if finalize else sources
                 assistant = Message(role="assistant", content=answer, sources=final_sources)
-                thread.messages.append(assistant)
-                threads.save(thread)
+                _append_messages(threads, thread_id, user_message, assistant)
                 yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': [source.model_dump() for source in final_sources], 'message': assistant.model_dump()})}\n\n"
             except BackendError as error:
                 thread.messages.pop()
                 yield f"event: error\ndata: {json.dumps({'message': error.message, 'code': error.code})}\n\n"
+            except Exception:
+                logger.exception("Streaming answer failed for thread %s", thread_id)
+                thread.messages.pop()
+                message = {"message": "The answer could not be generated. Try again.", "code": "stream_failed"}
+                yield f"event: error\ndata: {json.dumps(message)}\n\n"
+            finally:
+                print(f"[PERF] chat_stream_endpoint_total_seconds={time.perf_counter() - request_started:.4f}")
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -171,6 +205,36 @@ def create_app(settings: BackendSettings | None = None, thread_store=None, chat_
         return TranscriptionResponse(text=transcribe(settings, data, file.content_type))
 
     return app
+
+
+def _warm_up_local_models(settings: BackendSettings) -> None:
+    """Load local query-embedding / reranker models in the background so the first question isn't slow."""
+    if settings.embedding_backend not in ("hybrid", "local") and not settings.reranker_model:
+        return
+
+    def load():
+        from .vector_store import _shared_embedding_function, _shared_reranker
+
+        started = time.perf_counter()
+        try:
+            if settings.embedding_backend in ("hybrid", "local"):
+                _shared_embedding_function(settings.embedding_model, "", "local")(["warm up"])
+            if settings.reranker_model:
+                reranker = _shared_reranker(settings.reranker_model)
+                if reranker:
+                    reranker("warm up", ["warm up"])
+            print(f"[PERF] local_model_warmup_seconds={time.perf_counter() - started:.2f}")
+        except Exception as error:
+            logger.warning("Local model warm-up failed: %s", error)
+
+    threading.Thread(target=load, name="model-warmup", daemon=True).start()
+
+
+def _append_messages(threads, thread_id: str, *messages: Message) -> None:
+    """Re-read the thread before saving so concurrent requests don't overwrite each other's messages."""
+    latest = threads.get(thread_id)
+    latest.messages.extend(messages)
+    threads.save(latest)
 
 
 async def _json_error(error: BackendError):

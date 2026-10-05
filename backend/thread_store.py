@@ -17,14 +17,30 @@ class ThreadStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._cache = None
+
+    def _raw(self) -> list[dict]:
+        """Parsed JSON, re-read only when the file changes on disk."""
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return []
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if self._cache is None or self._cache[0] != signature:
+            try:
+                self._cache = (signature, json.loads(self.path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError) as error:
+                raise RuntimeError(f"Could not read thread metadata: {error}") from error
+        return self._cache[1]
+
+    @staticmethod
+    def _model(item: dict) -> Thread:
+        return Thread.model_validate(item) if hasattr(Thread, "model_validate") else Thread.parse_obj(item)
 
     def _read(self) -> list[Thread]:
-        if not self.path.exists():
-            return []
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-            return [Thread.model_validate(item) if hasattr(Thread, "model_validate") else Thread.parse_obj(item) for item in value]
-        except (OSError, ValueError, TypeError) as error:
+            return [self._model(item) for item in self._raw()]
+        except (ValueError, TypeError) as error:
             raise RuntimeError(f"Could not read thread metadata: {error}") from error
 
     def _write(self, threads: list[Thread]) -> None:
@@ -32,6 +48,7 @@ class ThreadStore:
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         temporary.replace(self.path)
+        self._cache = None
 
     def list(self) -> list[Thread]:
         with self._lock:
@@ -39,9 +56,9 @@ class ThreadStore:
 
     def get(self, thread_id: str) -> Thread:
         with self._lock:
-            for thread in self._read():
-                if thread.id == thread_id:
-                    return thread
+            for item in self._raw():
+                if item.get("id") == thread_id:
+                    return self._model(item)
         raise NotFoundError()
 
     def create(self, name: str | None = None) -> Thread:

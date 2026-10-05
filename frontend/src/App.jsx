@@ -12,6 +12,47 @@ function Icon({ name, size = 16 }) {
   };
   return <svg className={`icon icon-${name}`} width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
+const isTableLine = (line) => line.trim().startsWith("|");
+const isSeparatorRow = (cells) => cells.length > 0 && cells.every((cell) => /^:?-{2,}:?$/.test(cell));
+const splitRow = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+
+// Answers are plain text; markdown tables (2+ lines starting with "|") are shown as real tables.
+function MessageContent({ text }) {
+  const blocks = [];
+  let lines = [];
+  let table = [];
+  const flushText = () => { if (lines.length) blocks.push({ type: "text", value: lines.join("\n") }); lines = []; };
+  const flushTable = () => {
+    if (table.length >= 2) { flushText(); blocks.push({ type: "table", rows: table }); }
+    else lines.push(...table);
+    table = [];
+  };
+  for (const line of text.split("\n")) {
+    if (isTableLine(line)) table.push(line);
+    else { flushTable(); lines.push(line); }
+  }
+  flushTable();
+  flushText();
+  return blocks.map((block, index) => {
+    if (block.type === "text") return block.value.trim() ? <div className="content" key={index}>{block.value.replace(/^\n+|\n+$/g, "")}</div> : null;
+    const rows = block.rows.map(splitRow);
+    const hasHeader = rows.length > 1 && isSeparatorRow(rows[1]);
+    const header = hasHeader ? rows[0] : null;
+    const body = rows.filter((cells, i) => !isSeparatorRow(cells) && !(hasHeader && i === 0));
+    return <div className="table-wrap" key={index}><table className="answer-table">
+      {header && <thead><tr>{header.map((cell, i) => <th key={i}>{cell}</th>)}</tr></thead>}
+      <tbody>{body.map((cells, r) => <tr key={r}>{cells.map((cell, i) => <td key={i}>{cell}</td>)}</tr>)}</tbody>
+    </table></div>;
+  });
+}
+
+// Read tables aloud as sentences rather than pipe characters.
+const speechText = (text) => text
+  .split("\n")
+  .filter((line) => !(isTableLine(line) && isSeparatorRow(splitRow(line))))
+  .map((line) => (isTableLine(line) ? splitRow(line).filter(Boolean).join(", ") + "." : line))
+  .join("\n");
+
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, options);
   const body = await response.json().catch(() => ({}));
@@ -155,7 +196,7 @@ function App() {
   const speak = (text) => {
     if (!("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
+    const utterance = new SpeechSynthesisUtterance(speechText(text));
     utterance.onstart = () => setSpeaking(true);
     utterance.onend = () => setSpeaking(false);
     utterance.onerror = () => setSpeaking(false);
@@ -183,7 +224,7 @@ function App() {
         </header>
         <section className="messages">
           {!visibleMessages.length && <div className="welcome"><div className="welcome-icon"><Icon name="file" size={22} /></div><h2>Ask questions about your document</h2><p>Answers are grounded in the uploaded PDF and include page sources.</p></div>}
-          {visibleMessages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}-${message.content}`}><div className="avatar">{message.role === "user" ? "You" : "AI"}</div><div className="bubble"><div className="content">{message.content}</div>
+          {visibleMessages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}-${message.content}`}><div className="avatar">{message.role === "user" ? "You" : "AI"}</div><div className="bubble"><MessageContent text={message.content} />
             {message.role === "assistant" && !message.pending && <><button className={speaking ? "listen active" : "listen"} onClick={() => speak(message.content)}><Icon name="play" size={12} /> {speaking ? "Playing" : "Listen"}</button>{message.content.trim() !== NOT_FOUND_ANSWER && message.sources?.length > 0 && <details><summary>Sources ({message.sources.length})</summary>{message.sources.map((source, i) => <div className="source" key={i}><span className="source-page">Page {source.page}</span><span>{source.text.slice(0, 300)}{source.text.length > 300 ? "..." : ""}</span></div>)}</details>}</>}
             {message.role === "assistant" && message.pending && <button className="listen loading">Loading…</button>}
           </div></article>)}
